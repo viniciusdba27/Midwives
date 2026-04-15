@@ -27,7 +27,8 @@ async function forceClickLegacy(page) {
       await Promise.race([
         page.locator('text=CLICK HERE').first().click({ timeout: 500 }),
         page.getByRole('link', { name: /CLICK HERE/i }).click({ timeout: 500 }),
-        page.locator('a:has-text("CLICK HERE")').first().click({ timeout: 500 })
+        page.locator('a:has-text("CLICK HERE")').first().click({ timeout: 500 }),
+        page.locator('a.notice-middle-text-link').first().click({ timeout: 500 })
       ]).catch(() => {});
 
       await wait(300);
@@ -48,23 +49,53 @@ async function forceClickLegacy(page) {
   return false;
 }
 
+async function revealLoginFormIfHidden(page) {
+  console.log('Attempting targeted login form reveal...');
+
+  await page.evaluate(() => {
+    const login = document.getElementById('login');
+    if (login) {
+      login.style.display = 'block';
+      login.style.visibility = 'visible';
+      login.classList.remove('banner-countdown-hidden');
+    }
+
+    const username = document.querySelector('input[name="username"]');
+    const password = document.querySelector('input[name="password"]');
+
+    if (username) {
+      username.style.display = 'block';
+      username.style.visibility = 'visible';
+    }
+
+    if (password) {
+      password.style.display = 'block';
+      password.style.visibility = 'visible';
+    }
+  });
+}
+
 async function waitForVisibleLoginForm(page) {
   console.log('Waiting for visible login form...');
 
   const username = page.locator('input[name="username"]');
   const password = page.locator('input[name="password"]');
 
-  await username.waitFor({ state: 'visible', timeout: 60000 });
-  await password.waitFor({ state: 'visible', timeout: 60000 });
-
-  const usernameVisible = await username.isVisible();
-  const passwordVisible = await password.isVisible();
-
-  if (!usernameVisible || !passwordVisible) {
-    throw new Error('Login inputs are not visibly ready');
+  try {
+    await username.waitFor({ state: 'visible', timeout: 8000 });
+    await password.waitFor({ state: 'visible', timeout: 8000 });
+    console.log('Login form is visible without DOM assist');
+    return;
+  } catch (e) {
+    console.log('Login form still hidden. Applying targeted reveal...');
   }
 
-  console.log('Login form is visible and ready');
+  await revealLoginFormIfHidden(page);
+
+  await username.waitFor({ state: 'visible', timeout: 15000 });
+  await password.waitFor({ state: 'visible', timeout: 15000 });
+
+  console.log('Login form is visible after targeted reveal');
 }
 
 app.get('/', (req, res) => {
@@ -111,7 +142,6 @@ app.post('/run', async (req, res) => {
 
     console.log('Initial URL:', page.url());
 
-    // If login form is already visible, do NOT click CLICK HERE.
     const usernameInput = page.locator('input[name="username"]');
     const passwordInput = page.locator('input[name="password"]');
 
