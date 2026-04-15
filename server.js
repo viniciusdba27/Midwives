@@ -4,83 +4,99 @@ const { chromium } = require('playwright');
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 8080;
-
 const CONFIG = {
-  firstPageUrl: 'https://voiceportal.shawbusiness.ca/assistant/login',
+  firstPageUrl: 'https://smartvoice.shawbusiness.ca/auth/login/',
   username: process.env.ROGERS_USERNAME || '',
   password: process.env.ROGERS_PASSWORD || '',
-  userOptionLabel: '1, User (6047698134)',
-  sheetCsvUrl: 'https://docs.google.com/spreadsheets/d/1xvK-sf6WGiCkD0vhi9CVjNTRtM2Hff7VjYTDxJ1IDzw/export?format=csv&gid=1144063531'
+  headless: true,
+  userOptionLabel: '1, User (6047698134)'
 };
 
-async function wait(ms) {
+function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function getHoursFromSheet() {
-  const res = await fetch(CONFIG.sheetCsvUrl);
+async function forceClickLegacy(page) {
+  console.log('Force clicking CLICK HERE aggressively...');
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch sheet CSV. Status: ${res.status}`);
+  const start = Date.now();
+  const maxTime = 15000;
+
+  while (Date.now() - start < maxTime) {
+    try {
+      await Promise.race([
+        page.locator('text=CLICK HERE').first().click({ timeout: 500 }),
+        page.getByRole('link', { name: /CLICK HERE/i }).click({ timeout: 500 }),
+        page.locator('a:has-text("CLICK HERE")').first().click({ timeout: 500 })
+      ]).catch(() => {});
+
+      const url = page.url();
+
+      if (url.includes('/auth/login') || url.includes('/login')) {
+        console.log('Navigation detected after CLICK HERE');
+        return true;
+      }
+    } catch (e) {
+      // keep trying
+    }
+
+    await page.waitForTimeout(200);
   }
 
-  const text = await res.text();
-  const lines = text.trim().split('\n');
-
-  if (lines.length < 2) {
-    throw new Error('Automation sheet CSV does not have enough rows.');
-  }
-
-  const row = lines[1].split(',');
-  const value = String(row[1] || '').trim();
-
-  if (!value || isNaN(value)) {
-    throw new Error('Invalid HotelingHours value from sheet.');
-  }
-
-  return value;
+  console.log('Failed to click CLICK HERE in time');
+  return false;
 }
 
 app.get('/', (req, res) => {
-  res.status(200).send('Rogers Playwright service is running.');
+  res.send('Rogers Playwright service is running.');
 });
 
 app.post('/run', async (req, res) => {
+  console.log('RUN endpoint HIT');
+  console.log('Body:', req.body);
+
   let browser;
 
   try {
+    const hotelingHours = String(req.body?.hotelingHours || '').trim();
+
+    if (!hotelingHours || isNaN(hotelingHours)) {
+      throw new Error('Invalid hotelingHours');
+    }
+
     if (!CONFIG.username || !CONFIG.password) {
       throw new Error('Missing Cloud Run environment variables: ROGERS_USERNAME or ROGERS_PASSWORD');
     }
 
-    const requestedHours = String(req.body?.hotelingHours || '').trim();
-    const newHours = requestedHours && !isNaN(requestedHours)
-      ? requestedHours
-      : await getHoursFromSheet();
-
-    console.log(`Hours to apply: ${newHours}`);
+    console.log('Hours to apply:', hotelingHours);
 
     browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      headless: CONFIG.headless,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage'
+      ]
     });
 
     const context = await browser.newContext();
     const page = await context.newPage();
     page.setDefaultTimeout(60000);
 
-    console.log('Opening landing page...');
+    console.log('Opening entry page...');
     await page.goto(CONFIG.firstPageUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 60000
     });
 
-    console.log('Clicking legacy portal link...');
-    await page.getByText('CLICK HERE', { exact: true }).click();
+    console.log('Initial URL:', page.url());
+
+    await forceClickLegacy(page);
 
     console.log('Waiting for login page...');
     await page.waitForURL('**/auth/login/**', { timeout: 60000 });
+
+    console.log('Login page URL:', page.url());
 
     console.log('Filling login...');
     await page.locator('input[name="username"]').fill(CONFIG.username);
@@ -91,16 +107,17 @@ app.post('/run', async (req, res) => {
 
     console.log('Waiting for dashboard...');
     await page.waitForURL('**/index/dashboard/**', { timeout: 60000 });
-    await page.waitForLoadState('domcontentloaded');
 
     console.log('Selecting user...');
-    await page.getByLabel('User', { exact: true }).selectOption({ label: CONFIG.userOptionLabel });
+    await page.getByLabel('User', { exact: true }).selectOption({
+      label: CONFIG.userOptionLabel
+    });
 
     console.log('Waiting for user services page...');
     await page.waitForURL('**/user/user_services/**', { timeout: 60000 });
-    await page.waitForLoadState('domcontentloaded');
 
     const serviceType = page.locator('#serviceTypeSelect');
+
     if (await serviceType.count()) {
       console.log('Selecting Call Control...');
       await serviceType.selectOption('CallControl');
@@ -108,35 +125,45 @@ app.post('/run', async (req, res) => {
     }
 
     console.log('Opening Hoteling Guest editor...');
-    const hotelingRow = page.locator('.user_service_container').filter({ hasText: 'Hoteling Guest' });
+    const hotelingRow = page
+      .locator('.user_service_container')
+      .filter({ hasText: 'Hoteling Guest' });
+
     await hotelingRow.getByRole('button', { name: 'Edit' }).click();
 
     console.log('Waiting for Hoteling Guest modal...');
-    const modal = page.locator('.ui-dialog').filter({ hasText: 'Hoteling Guest' });
+    const modal = page
+      .locator('.ui-dialog')
+      .filter({ hasText: 'Hoteling Guest' });
+
     await modal.waitFor({ state: 'visible', timeout: 60000 });
 
+    console.log('Setting hours...');
     const hoursInput = modal.getByRole('textbox', { name: 'Hours' });
-    await hoursInput.click();
+
     await hoursInput.fill('');
-    await hoursInput.fill(newHours);
+    await hoursInput.fill(hotelingHours);
 
     const typedValue = await hoursInput.inputValue();
+    console.log('Typed value:', typedValue);
 
-    if (typedValue !== newHours) {
-      throw new Error(`Hours field verification failed. Expected ${newHours}, but found ${typedValue}`);
+    if (typedValue !== hotelingHours) {
+      throw new Error(`Hours mismatch. Expected ${hotelingHours}, got ${typedValue}`);
     }
 
-    console.log('Saving modal...');
+    console.log('Saving...');
     await modal.getByRole('button', { name: 'Save' }).click();
 
     await wait(2000);
 
-    res.status(200).json({
+    console.log('SUCCESS');
+
+    res.json({
       ok: true,
-      message: `Hoteling Guest hours updated to ${newHours}`
+      message: `Updated Hoteling Guest hours to ${hotelingHours}`
     });
   } catch (error) {
-    console.error('Cloud Run failed:', error.message);
+    console.error('ERROR:', error.message);
 
     res.status(500).json({
       ok: false,
@@ -149,6 +176,7 @@ app.post('/run', async (req, res) => {
   }
 });
 
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
