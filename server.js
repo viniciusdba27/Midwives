@@ -1,7 +1,7 @@
 const express = require('express');
 const { chromium } = require('playwright');
-
 const app = express();
+
 app.use(express.json());
 
 const CONFIG = {
@@ -16,35 +16,86 @@ function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function forceClickLegacy(page) {
-  console.log('Force clicking CLICK HERE aggressively...');
+// Improved banner bypass function
+async function bypassRedirectBanner(page) {
+  console.log('Attempting to bypass redirect banner and countdown...');
 
-  const start = Date.now();
-  const maxTime = 15000;
+  try {
+    // Small wait for page to start rendering the banner
+    await page.waitForTimeout(800);
 
-  while (Date.now() - start < maxTime) {
-    try {
-      await Promise.race([
-        page.locator('text=CLICK HERE').first().click({ timeout: 500 }),
-        page.getByRole('link', { name: /CLICK HERE/i }).click({ timeout: 500 }),
-        page.locator('a:has-text("CLICK HERE")').first().click({ timeout: 500 })
-      ]).catch(() => {});
+    // Try to click the legacy portal link
+    const legacySelectors = [
+      'text=CLICK HERE to access the legacy portal',
+      '#legacyPortalButton',
+      'a:has-text("CLICK HERE")',
+      'a.notice-middle-text-link'
+    ];
 
-      const url = page.url();
-
-      if (url.includes('/auth/login') || url.includes('/login')) {
-        console.log('Navigation detected after CLICK HERE');
-        return true;
+    let clicked = false;
+    for (const selector of legacySelectors) {
+      try {
+        const element = page.locator(selector).first();
+        if (await element.count() > 0) {
+          await element.click({ timeout: 5000 });
+          console.log(`Successfully clicked legacy link using: ${selector}`);
+          clicked = true;
+          break;
+        }
+      } catch (e) {
+        // continue to next selector
       }
-    } catch (e) {
-      // keep trying
     }
 
-    await page.waitForTimeout(200);
-  }
+    if (!clicked) {
+      console.log('Legacy link not found - using JavaScript fallback');
+    }
 
-  console.log('Failed to click CLICK HERE in time');
-  return false;
+    // Strong JavaScript fallback: force hide banner and show login form
+    await page.evaluate(() => {
+      // Hide the entire redirect banner
+      const banner = document.getElementById('banner-redirect-notice');
+      if (banner) {
+        banner.style.display = 'none';
+        banner.remove();
+      }
+
+      // Show the login section
+      const loginSection = document.getElementById('login');
+      if (loginSection) {
+        loginSection.classList.remove('banner-countdown-hidden');
+        loginSection.style.display = 'block';
+        loginSection.style.visibility = 'visible';
+      }
+
+      // Remove any anti-clickjack styles
+      const antiClickjack = document.getElementById('antiClickjack');
+      if (antiClickjack) antiClickjack.remove();
+
+      // Extra cleanup - remove any overlays or hidden classes
+      document.querySelectorAll('div[style*="display: none"]').forEach(el => {
+        if (el.id === 'login' || el.classList.contains('main')) {
+          el.style.display = 'block';
+        }
+      });
+    });
+
+    console.log('Banner bypass completed (click + JS fallback)');
+
+    // Wait for the actual login form to appear
+    await page.waitForSelector('input[name="username"]', {
+      state: 'visible',
+      timeout: 15000
+    });
+
+    console.log('✅ Legacy login form is visible and ready');
+    return true;
+
+  } catch (err) {
+    console.warn('Banner bypass encountered an issue:', err.message);
+    // Continue anyway - the form might still be accessible
+    return false;
+  }
 }
 
 app.get('/', (req, res) => {
@@ -59,13 +110,12 @@ app.post('/run', async (req, res) => {
 
   try {
     const hotelingHours = String(req.body?.hotelingHours || '').trim();
-
     if (!hotelingHours || isNaN(hotelingHours)) {
       throw new Error('Invalid hotelingHours');
     }
 
     if (!CONFIG.username || !CONFIG.password) {
-      throw new Error('Missing Cloud Run environment variables: ROGERS_USERNAME or ROGERS_PASSWORD');
+      throw new Error('Missing environment variables: ROGERS_USERNAME or ROGERS_PASSWORD');
     }
 
     console.log('Hours to apply:', hotelingHours);
@@ -75,11 +125,15 @@ app.post('/run', async (req, res) => {
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage'
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled'
       ]
     });
 
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 720 }
+    });
+
     const page = await context.newPage();
     page.setDefaultTimeout(60000);
 
@@ -91,14 +145,10 @@ app.post('/run', async (req, res) => {
 
     console.log('Initial URL:', page.url());
 
-    await forceClickLegacy(page);
+    // === Bypass the countdown banner ===
+    await bypassRedirectBanner(page);
 
-    console.log('Waiting for login page...');
-    await page.waitForURL('**/auth/login/**', { timeout: 60000 });
-
-    console.log('Login page URL:', page.url());
-
-    console.log('Filling login...');
+    console.log('Filling login credentials...');
     await page.locator('input[name="username"]').fill(CONFIG.username);
     await page.locator('input[name="password"]').fill(CONFIG.password);
 
@@ -117,7 +167,6 @@ app.post('/run', async (req, res) => {
     await page.waitForURL('**/user/user_services/**', { timeout: 60000 });
 
     const serviceType = page.locator('#serviceTypeSelect');
-
     if (await serviceType.count()) {
       console.log('Selecting Call Control...');
       await serviceType.selectOption('CallControl');
@@ -140,7 +189,6 @@ app.post('/run', async (req, res) => {
 
     console.log('Setting hours...');
     const hoursInput = modal.getByRole('textbox', { name: 'Hours' });
-
     await hoursInput.fill('');
     await hoursInput.fill(hotelingHours);
 
@@ -151,20 +199,18 @@ app.post('/run', async (req, res) => {
       throw new Error(`Hours mismatch. Expected ${hotelingHours}, got ${typedValue}`);
     }
 
-    console.log('Saving...');
+    console.log('Saving changes...');
     await modal.getByRole('button', { name: 'Save' }).click();
-
     await wait(2000);
 
-    console.log('SUCCESS');
-
+    console.log('✅ SUCCESS');
     res.json({
       ok: true,
       message: `Updated Hoteling Guest hours to ${hotelingHours}`
     });
+
   } catch (error) {
     console.error('ERROR:', error.message);
-
     res.status(500).json({
       ok: false,
       error: error.message
