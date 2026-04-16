@@ -171,7 +171,7 @@ async function waitForAuthenticatedPage(page) {
   }
 }
 
-async function pageLooksEmpty(page) {
+async function getPageDiagnostics(page) {
   const bodyText = await page.locator('body').innerText().catch(() => '');
   const serviceCardCount = await page.locator('.user_service_container').count().catch(() => 0);
   const hasMeaningfulText = bodyText.trim().length > 20;
@@ -187,14 +187,14 @@ async function navigateToUserServices(page) {
 
   await wait(5000);
 
-  let empty = await pageLooksEmpty(page);
+  let empty = await getPageDiagnostics(page);
 
   if (!empty) return;
 
   await page.reload({ waitUntil: 'load', timeout: 60000 });
   await wait(5000);
 
-  empty = await pageLooksEmpty(page);
+  empty = await getPageDiagnostics(page);
 
   if (!empty) return;
 
@@ -223,7 +223,7 @@ async function navigateToUserServices(page) {
   await page.waitForLoadState('load');
   await wait(5000);
 
-  const finalEmpty = await pageLooksEmpty(page);
+  const finalEmpty = await getPageDiagnostics(page);
   if (finalEmpty) {
     throw new Error('User services page is still empty even after dashboard fallback');
   }
@@ -302,6 +302,8 @@ app.post('/run', async (req, res) => {
 
   try {
     const hotelingHours = String(req.body?.hotelingHours || '').trim();
+    const dryRun = Boolean(req.body?.dryRun);
+    const traceLabel = String(req.body?.traceLabel || '');
 
     if (!hotelingHours || isNaN(hotelingHours)) {
       throw new Error('Invalid hotelingHours: must be a number');
@@ -331,28 +333,22 @@ app.post('/run', async (req, res) => {
     page = await context.newPage();
     page.setDefaultTimeout(60000);
 
-    console.log('Step 1. Navigate to login');
-    await navigateToLegacyLogin(page);
+    console.log(`Run started. Label: ${traceLabel}. Dry run: ${dryRun}. Hours: ${hotelingHours}`);
 
-    console.log('Step 2. Wait for login form');
+    await navigateToLegacyLogin(page);
     await waitForLoginForm(page);
 
     const { usernameInput, passwordInput, loginButton } = await getVisibleLoginElements(page);
 
-    console.log('Step 3. Submit login');
     await usernameInput.fill(CONFIG.username);
     await passwordInput.fill(CONFIG.password);
     await loginButton.click();
 
-    console.log('Step 4. Wait for authenticated page');
     await waitForAuthenticatedPage(page);
 
     await page.unroute('**/js/common.js**');
 
-    console.log('Step 5. Navigate to user services');
     await navigateToUserServices(page);
-
-    console.log('Step 6. Open Hoteling Guest modal');
     await openHotelingModal(page);
 
     const modal = page
@@ -361,7 +357,6 @@ app.post('/run', async (req, res) => {
 
     await modal.waitFor({ state: 'visible', timeout: 30000 });
 
-    console.log('Step 7. Update hours');
     const hoursInput = modal.getByRole('textbox', { name: 'Hours' });
 
     await hoursInput.click({ clickCount: 3 });
@@ -374,7 +369,16 @@ app.post('/run', async (req, res) => {
       throw new Error(`Hours field mismatch. Expected "${hotelingHours}", got "${typedValue}"`);
     }
 
-    console.log('Step 8. Save');
+    if (dryRun) {
+      console.log('Dry run completed successfully');
+      res.json({
+        ok: true,
+        dryRun: true,
+        message: `Dry run confirmed access to Hoteling Guest for hours ${hotelingHours}`
+      });
+      return;
+    }
+
     await modal.getByRole('button', { name: 'Save' }).click();
     await modal.waitFor({ state: 'hidden', timeout: 15000 });
 
@@ -382,6 +386,7 @@ app.post('/run', async (req, res) => {
 
     res.json({
       ok: true,
+      dryRun: false,
       message: `Updated Hoteling Guest hours to ${hotelingHours}`
     });
   } catch (error) {
