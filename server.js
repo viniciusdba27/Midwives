@@ -9,7 +9,8 @@ const CONFIG = {
   username: process.env.ROGERS_USERNAME || '',
   password: process.env.ROGERS_PASSWORD || '',
   headless: true,
-  userOptionLabel: '1, User (6047698134)'
+  userOptionLabel: '1, User (6047698134)',
+  userServicesUrl: 'https://smartvoice.shawbusiness.ca/user/user_services/?userId=6047698134%40shawbusiness.ca'
 };
 
 function wait(ms) {
@@ -17,10 +18,10 @@ function wait(ms) {
 }
 
 async function navigateToLegacyLogin(page) {
-  console.log('[nav] Blocking common.js...');
+  console.log('[nav] Setting up common.js route interception...');
 
   await page.route('**/js/common.js**', (route) => {
-    console.log('[nav] Blocked:', route.request().url());
+    console.log('[nav] Blocked common.js ->', route.request().url());
     route.abort();
   });
 
@@ -30,109 +31,207 @@ async function navigateToLegacyLogin(page) {
     timeout: 30000
   });
 
-  console.log('[nav] Injecting banner removal...');
+  console.log('[nav] DOM loaded. Injecting banner removal...');
+
   await page.evaluate(() => {
-    document.getElementById('banner-redirect-notice')?.remove();
+    const banner = document.getElementById('banner-redirect-notice');
+    if (banner) {
+      banner.remove();
+    }
 
     const loginDiv = document.getElementById('login');
     if (loginDiv) {
       loginDiv.classList.remove('banner-countdown-hidden');
-      loginDiv.style.cssText += ';display:block!important;visibility:visible!important;opacity:1!important;';
+      loginDiv.style.display = '';
+      loginDiv.style.visibility = 'visible';
+      loginDiv.style.opacity = '1';
     }
 
-    ['username', 'password'].forEach(name => {
+    ['username', 'password'].forEach((name) => {
       const el = document.querySelector(`input[name="${name}"]`);
       if (el) {
-        el.style.cssText += ';display:block!important;visibility:visible!important;opacity:1!important;';
+        el.style.display = '';
+        el.style.visibility = 'visible';
+        el.style.opacity = '1';
       }
     });
   });
 
-  console.log('[nav] Done. URL:', page.url());
+  console.log('[nav] JS injection complete.');
 }
 
 async function waitForLoginForm(page) {
-  console.log('[login] Waiting for inputs...');
+  console.log('[login] Waiting for login form inputs to be interactable...');
 
-  const username = page.locator('input[name="username"]');
-  const password = page.locator('input[name="password"]');
+  const usernameLocator = page.locator('input[name="username"]');
+  const passwordLocator = page.locator('input[name="password"]');
 
   try {
-    await username.waitFor({ state: 'visible', timeout: 15000 });
-    await password.waitFor({ state: 'visible', timeout: 15000 });
-  } catch {
-    console.log('[login] Second reveal pass...');
+    await usernameLocator.waitFor({ state: 'visible', timeout: 15000 });
+    await passwordLocator.waitFor({ state: 'visible', timeout: 15000 });
+  } catch (e) {
+    console.log('[login] Inputs not visible yet. Running second reveal pass...');
+
     await page.evaluate(() => {
-      ['username', 'password'].forEach(name => {
-        let el = document.querySelector(`input[name="${name}"]`);
-        while (el && el !== document.body) {
-          el.style.cssText += ';display:block!important;visibility:visible!important;opacity:1!important;';
-          el.classList.forEach(c => {
-            if (c.includes('hidden') || c.includes('collapse')) el.classList.remove(c);
-          });
-          el = el.parentElement;
+      const loginDiv = document.getElementById('login');
+      if (loginDiv) {
+        loginDiv.classList.remove('banner-countdown-hidden');
+        loginDiv.style.display = 'block';
+        loginDiv.style.visibility = 'visible';
+        loginDiv.style.opacity = '1';
+      }
+
+      let el = document.querySelector('input[name="username"]');
+      while (el && el !== document.body) {
+        el.style.visibility = 'visible';
+        el.style.opacity = '1';
+        if (el.tagName === 'INPUT') {
+          el.style.display = 'block';
         }
-      });
+        el = el.parentElement;
+      }
+
+      let el2 = document.querySelector('input[name="password"]');
+      while (el2 && el2 !== document.body) {
+        el2.style.visibility = 'visible';
+        el2.style.opacity = '1';
+        if (el2.tagName === 'INPUT') {
+          el2.style.display = 'block';
+        }
+        el2 = el2.parentElement;
+      }
     });
-    await username.waitFor({ state: 'visible', timeout: 10000 });
-    await password.waitFor({ state: 'visible', timeout: 10000 });
+
+    await usernameLocator.waitFor({ state: 'visible', timeout: 10000 });
+    await passwordLocator.waitFor({ state: 'visible', timeout: 10000 });
   }
 
-  const zeroSize = await page.evaluate(() => {
-    const el = document.querySelector('input[name="username"]');
-    if (!el) return true;
-    const r = el.getBoundingClientRect();
-    return r.width === 0 || r.height === 0;
+  const stillHidden = await page.evaluate(() => {
+    const u = document.querySelector('input[name="username"]');
+    if (!u) return true;
+    const rect = u.getBoundingClientRect();
+    return rect.width === 0 || rect.height === 0;
   });
-  if (zeroSize) throw new Error('Username input is zero-size after reveal attempts');
 
-  console.log('[login] Form is ready.');
+  if (stillHidden) {
+    throw new Error('Username input is still hidden after reveal attempts');
+  }
+
+  console.log('[login] Login form is ready.');
 }
 
-async function selectUserFromDashboard(page) {
-  console.log('[dashboard] Waiting for user dropdown...');
+async function getVisibleLoginElements(page) {
+  console.log('[login] Locating visible login form...');
 
-  const userSelect = page.getByLabel('User', { exact: true });
-  await userSelect.waitFor({ state: 'visible', timeout: 30000 });
+  const loginContainerCandidates = [
+    page.locator('#login').first(),
+    page.locator('form:has(input[name="username"])').first(),
+    page.locator('body').first()
+  ];
 
-  // Wait until the dropdown has options populated and is not disabled
-  await page.waitForFunction(() => {
-    const sel = [...document.querySelectorAll('select')]
-      .find(s => s.labels?.[0]?.textContent?.trim() === 'User');
-    return sel && sel.options.length > 1 && !sel.disabled;
-  }, { timeout: 15000 });
+  for (const candidate of loginContainerCandidates) {
+    try {
+      const isVisible = await candidate.isVisible().catch(() => false);
+      if (!isVisible) {
+        continue;
+      }
 
-  console.log('[dashboard] Selecting user:', CONFIG.userOptionLabel);
-  await userSelect.selectOption({ label: CONFIG.userOptionLabel });
+      const usernameInput = candidate.locator('input[name="username"]').first();
+      const passwordInput = candidate.locator('input[name="password"]').first();
 
-  console.log('[dashboard] Waiting for user services navigation...');
-  await page.waitForURL('**/user/user_services/**', { timeout: 60000 });
+      const userVisible = await usernameInput.isVisible().catch(() => false);
+      const passVisible = await passwordInput.isVisible().catch(() => false);
+
+      if (userVisible && passVisible) {
+        let loginButton = candidate.getByRole('button', { name: 'Login' }).first();
+        const buttonVisible = await loginButton.isVisible().catch(() => false);
+
+        if (!buttonVisible) {
+          loginButton = page.getByRole('button', { name: 'Login' }).first();
+        }
+
+        console.log('[login] Using visible login container.');
+        return {
+          usernameInput,
+          passwordInput,
+          loginButton
+        };
+      }
+    } catch (e) {
+      // continue
+    }
+  }
+
+  throw new Error('Could not find a visible usable login form');
+}
+
+async function waitForAuthenticatedPage(page) {
+  console.log('[login] Waiting for post login navigation...');
+
+  await Promise.race([
+    page.waitForURL('**/index/dashboard/**', { timeout: 60000 }),
+    page.waitForURL('**/user/user_services/**', { timeout: 60000 }),
+    page.waitForURL('**/assistant/login**', { timeout: 60000 }),
+    page.waitForURL('**/auth/login/**', { timeout: 60000 })
+  ]);
+
+  const postLoginUrl = page.url();
+  console.log('[login] Post login URL:', postLoginUrl);
+
+  if (postLoginUrl.includes('/assistant/login') || postLoginUrl.includes('/auth/login/')) {
+    throw new Error(`Login did not reach an authenticated page. Landed on: ${postLoginUrl}`);
+  }
+}
+
+async function openHotelingModal(page) {
+  console.log('[hoteling] Waiting for user services content to settle...');
   await page.waitForLoadState('domcontentloaded');
+  await wait(2000);
 
-  console.log('[dashboard] Reached user services:', page.url());
-}
-
-async function selectCallControl(page) {
   const serviceType = page.locator('#serviceTypeSelect');
+  if (await serviceType.count()) {
+    console.log('[services] Selecting Call Control...');
+    await serviceType.selectOption('CallControl');
+    await wait(2500);
+  }
 
-  if (!await serviceType.count()) {
-    console.log('[services] No #serviceTypeSelect found — skipping.');
+  console.log('[hoteling] Looking for Hoteling text anywhere on page...');
+  const pageText = await page.locator('body').innerText().catch(() => '');
+  console.log('[hoteling] Page text sample:', pageText.slice(0, 3000));
+
+  const hotelingRow = page
+    .locator('.user_service_container')
+    .filter({ hasText: /Hoteling Guest/i });
+
+  const hotelingTextAnywhere = page.locator('text=/Hoteling Guest/i').first();
+
+  const rowCount = await hotelingRow.count().catch(() => 0);
+  const textCount = await hotelingTextAnywhere.count().catch(() => 0);
+
+  console.log('[hoteling] Matching row count:', rowCount);
+  console.log('[hoteling] Matching text count:', textCount);
+
+  if (rowCount > 0) {
+    console.log('[hoteling] Waiting for Hoteling row to become visible...');
+    await hotelingRow.first().waitFor({ state: 'visible', timeout: 30000 });
+
+    console.log('[hoteling] Clicking Edit inside Hoteling row...');
+    await hotelingRow.first().getByRole('button', { name: 'Edit' }).click();
     return;
   }
 
-  console.log('[services] Selecting Call Control...');
-  await serviceType.selectOption('CallControl');
+  if (textCount > 0) {
+    console.log('[hoteling] Hoteling text exists but row selector failed. Trying nearby Edit button...');
+    const container = hotelingTextAnywhere.locator('xpath=ancestor::*[contains(@class,"user_service_container")][1]');
+    await container.waitFor({ state: 'visible', timeout: 30000 });
+    await container.getByRole('button', { name: 'Edit' }).click();
+    return;
+  }
 
-  // Wait for service containers to re-render
-  await page.waitForFunction(() => {
-    return document.querySelectorAll('.user_service_container').length > 0;
-  }, { timeout: 15000 });
-
-  await wait(500);
-  console.log('[services] Call Control selected.');
+  throw new Error('Hoteling Guest section not found on the user services page');
 }
 
-app.get('/', (_req, res) => {
+app.get('/', (req, res) => {
   res.send('Rogers Playwright service is running.');
 });
 
@@ -143,18 +242,25 @@ app.post('/run', async (req, res) => {
   let browser;
 
   try {
-    const hotelingHours = String(req.body?.hotelingHours ?? '').trim();
+    const hotelingHours = String(req.body?.hotelingHours || '').trim();
+
     if (!hotelingHours || isNaN(hotelingHours)) {
       throw new Error('Invalid hotelingHours: must be a number');
     }
+
     if (!CONFIG.username || !CONFIG.password) {
       throw new Error('Missing env vars: ROGERS_USERNAME or ROGERS_PASSWORD');
     }
+
     console.log('[config] Hours to apply:', hotelingHours);
 
     browser = await chromium.launch({
       headless: CONFIG.headless,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage'
+      ]
     });
 
     const context = await browser.newContext({
@@ -164,57 +270,43 @@ app.post('/run', async (req, res) => {
         'AppleWebKit/537.36 (KHTML, like Gecko) ' +
         'Chrome/124.0.0.0 Safari/537.36'
     });
+
     const page = await context.newPage();
     page.setDefaultTimeout(60000);
 
-    // ── Login ────────────────────────────────────────────────────────────────
     await navigateToLegacyLogin(page);
+    console.log('[nav] Current URL after navigation:', page.url());
+
     await waitForLoginForm(page);
 
+    const { usernameInput, passwordInput, loginButton } = await getVisibleLoginElements(page);
+
     console.log('[login] Filling credentials...');
-    await page.locator('input[name="username"]').fill(CONFIG.username);
-    await page.locator('input[name="password"]').fill(CONFIG.password);
+    await usernameInput.fill(CONFIG.username);
+    await passwordInput.fill(CONFIG.password);
 
     console.log('[login] Submitting...');
-    await page.getByRole('button', { name: 'Login' }).click();
+    await loginButton.click();
 
-    // ── Dashboard ────────────────────────────────────────────────────────────
-    console.log('[dashboard] Waiting for dashboard...');
-    await page.waitForURL('**/index/dashboard/**', { timeout: 60000 });
-    await page.waitForLoadState('domcontentloaded');
-    console.log('[dashboard] Reached:', page.url());
+    await waitForAuthenticatedPage(page);
 
-    // ── Select user → triggers navigation to user services ───────────────────
-    await selectUserFromDashboard(page);
+    console.log('[services] Navigating directly to user services page...');
+    await page.goto(CONFIG.userServicesUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
 
-    // ── Select Call Control ──────────────────────────────────────────────────
-    await selectCallControl(page);
+    console.log('[services] Current URL:', page.url());
 
-    // ── Open Hoteling Guest editor ───────────────────────────────────────────
-    console.log('[hoteling] Locating Hoteling Guest row...');
-    const hotelingRow = page
-      .locator('.user_service_container')
-      .filter({ hasText: 'Hoteling Guest' });
+    await openHotelingModal(page);
 
-    const rowCount = await hotelingRow.count();
-    if (rowCount === 0) {
-      throw new Error(
-        'Hoteling Guest row not found. ' +
-        'Call Control may not have loaded, or the service is not assigned to this user.'
-      );
-    }
-
-    await hotelingRow.waitFor({ state: 'visible', timeout: 15000 });
-    await hotelingRow.getByRole('button', { name: 'Edit' }).click();
-
-    // ── Modal ────────────────────────────────────────────────────────────────
     console.log('[hoteling] Waiting for modal...');
     const modal = page
       .locator('.ui-dialog')
       .filter({ hasText: 'Hoteling Guest' });
+
     await modal.waitFor({ state: 'visible', timeout: 30000 });
 
-    // ── Set hours ────────────────────────────────────────────────────────────
     console.log('[hoteling] Setting hours to:', hotelingHours);
     const hoursInput = modal.getByRole('textbox', { name: 'Hours' });
 
@@ -223,26 +315,38 @@ app.post('/run', async (req, res) => {
     await hoursInput.fill(hotelingHours);
 
     const typedValue = await hoursInput.inputValue();
-    console.log('[hoteling] Field value confirmed:', typedValue);
+    console.log('[hoteling] Confirmed value in field:', typedValue);
+
     if (typedValue !== hotelingHours) {
-      throw new Error(`Hours mismatch. Expected "${hotelingHours}", got "${typedValue}"`);
+      throw new Error(
+        `Hours field mismatch. Expected "${hotelingHours}", got "${typedValue}"`
+      );
     }
 
-    // ── Save ─────────────────────────────────────────────────────────────────
     console.log('[hoteling] Saving...');
     await modal.getByRole('button', { name: 'Save' }).click();
+
     await modal.waitFor({ state: 'hidden', timeout: 15000 });
 
     console.log('=== SUCCESS ===\n');
-    res.json({ ok: true, message: `Updated Hoteling Guest hours to ${hotelingHours}` });
-
+    res.json({
+      ok: true,
+      message: `Updated Hoteling Guest hours to ${hotelingHours}`
+    });
   } catch (error) {
     console.error('=== ERROR ===', error.message, '\n');
-    res.status(500).json({ ok: false, error: error.message });
+    res.status(500).json({
+      ok: false,
+      error: error.message
+    });
   } finally {
-    if (browser) await browser.close();
+    if (browser) {
+      await browser.close();
+    }
   }
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
