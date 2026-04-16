@@ -185,45 +185,50 @@ async function waitForAuthenticatedPage(page) {
 async function openHotelingModal(page) {
   console.log('[hoteling] Waiting for user services content to render...');
 
-  await page.waitForLoadState('load');
   await page.waitForLoadState('domcontentloaded');
-  await wait(4000);
+  await wait(3000);
 
   try {
-    await Promise.race([
-      page.locator('.user_service_container').first().waitFor({ state: 'visible', timeout: 20000 }),
-      page.locator('#serviceTypeSelect').waitFor({ state: 'visible', timeout: 20000 }),
-      page.locator('text=Hoteling Guest').first().waitFor({ state: 'visible', timeout: 20000 })
-    ]);
+    await page.waitForLoadState('networkidle', { timeout: 15000 });
   } catch (e) {
-    console.log('[hoteling] No visible service content yet. Retrying with reload...');
-    await page.reload({ waitUntil: 'load', timeout: 60000 });
-    await wait(4000);
+    console.log('[hoteling] networkidle did not happen, continuing...');
   }
 
-  const pageText = await page.locator('body').innerText().catch(() => '');
-  console.log('[hoteling] Page text sample:', pageText.slice(0, 3000));
+  await wait(3000);
+
+  const serviceCards = page.locator('.user_service_container');
+  const serviceCardCount = await serviceCards.count().catch(() => 0);
+  console.log('[hoteling] Service card count:', serviceCardCount);
+
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  console.log('[hoteling] Page text sample:', bodyText.slice(0, 4000));
+
+  const bodyHtml = await page.locator('body').innerHTML().catch(() => '');
+  console.log('[hoteling] Page HTML sample:', bodyHtml.slice(0, 4000));
 
   const hotelingRow = page
     .locator('.user_service_container')
     .filter({ hasText: /Hoteling Guest/i });
 
-  const hotelingTextAnywhere = page.locator('text=/Hoteling Guest/i').first();
+  const hotelingAnywhere = page.locator('text=/Hoteling/i').first();
+  const guestAnywhere = page.locator('text=/Guest/i').first();
 
-  const rowCount = await hotelingRow.count().catch(() => 0);
-  const textCount = await hotelingTextAnywhere.count().catch(() => 0);
+  const hotelingRowCount = await hotelingRow.count().catch(() => 0);
+  const hotelingAnywhereCount = await hotelingAnywhere.count().catch(() => 0);
+  const guestAnywhereCount = await guestAnywhere.count().catch(() => 0);
 
-  console.log('[hoteling] Matching row count:', rowCount);
-  console.log('[hoteling] Matching text count:', textCount);
+  console.log('[hoteling] Matching row count:', hotelingRowCount);
+  console.log('[hoteling] Hoteling text count:', hotelingAnywhereCount);
+  console.log('[hoteling] Guest text count:', guestAnywhereCount);
 
-  if (rowCount > 0) {
+  if (hotelingRowCount > 0) {
     await hotelingRow.first().waitFor({ state: 'visible', timeout: 30000 });
     await hotelingRow.first().getByRole('button', { name: 'Edit' }).click();
     return;
   }
 
-  if (textCount > 0) {
-    const container = hotelingTextAnywhere.locator('xpath=ancestor::*[contains(@class,"user_service_container")][1]');
+  if (hotelingAnywhereCount > 0) {
+    const container = hotelingAnywhere.locator('xpath=ancestor::*[contains(@class,"user_service_container")][1]');
     await container.waitFor({ state: 'visible', timeout: 30000 });
     await container.getByRole('button', { name: 'Edit' }).click();
     return;
