@@ -11,7 +11,8 @@ const CONFIG = {
   password: process.env.ROGERS_PASSWORD || '',
   headless: true,
   userServicesUrl: 'https://smartvoice.shawbusiness.ca/user/user_services/?userId=6047698134%40shawbusiness.ca&type=CallControl',
-  dashboardUrl: 'https://smartvoice.shawbusiness.ca/index/dashboard/'
+  dashboardUrl: 'https://smartvoice.shawbusiness.ca/index/dashboard/',
+  appsScriptWebAppUrl: 'https://script.google.com/macros/s/AKfycbwuQfMkznzO-rJfeqZh6VafGl5-Sm6PjHfPVh2BC01yEgo-n4mWLeptuQg7mh0pZ-Qy/exec'
 };
 
 function wait(ms) {
@@ -171,7 +172,7 @@ async function waitForAuthenticatedPage(page) {
   }
 }
 
-async function getPageDiagnostics(page) {
+async function pageLooksEmpty(page) {
   const bodyText = await page.locator('body').innerText().catch(() => '');
   const serviceCardCount = await page.locator('.user_service_container').count().catch(() => 0);
   const hasMeaningfulText = bodyText.trim().length > 20;
@@ -187,14 +188,14 @@ async function navigateToUserServices(page) {
 
   await wait(5000);
 
-  let empty = await getPageDiagnostics(page);
+  let empty = await pageLooksEmpty(page);
 
   if (!empty) return;
 
   await page.reload({ waitUntil: 'load', timeout: 60000 });
   await wait(5000);
 
-  empty = await getPageDiagnostics(page);
+  empty = await pageLooksEmpty(page);
 
   if (!empty) return;
 
@@ -223,7 +224,7 @@ async function navigateToUserServices(page) {
   await page.waitForLoadState('load');
   await wait(5000);
 
-  const finalEmpty = await getPageDiagnostics(page);
+  const finalEmpty = await pageLooksEmpty(page);
   if (finalEmpty) {
     throw new Error('User services page is still empty even after dashboard fallback');
   }
@@ -290,21 +291,11 @@ async function openHotelingModal(page) {
   throw new Error('Hoteling Guest section not found on the fully rendered user services page');
 }
 
-app.get('/', (_req, res) => {
-  res.send('Rogers Playwright service is running.');
-});
-
-app.post('/run', async (req, res) => {
-  console.log('Run request received');
-
+async function runRogersUpdate(hotelingHours, dryRun, traceLabel) {
   let browser;
   let page;
 
   try {
-    const hotelingHours = String(req.body?.hotelingHours || '').trim();
-    const dryRun = Boolean(req.body?.dryRun);
-    const traceLabel = String(req.body?.traceLabel || '');
-
     if (!hotelingHours || isNaN(hotelingHours)) {
       throw new Error('Invalid hotelingHours: must be a number');
     }
@@ -361,22 +352,21 @@ app.post('/run', async (req, res) => {
 
     await hoursInput.click({ clickCount: 3 });
     await hoursInput.press('Backspace');
-    await hoursInput.fill(hotelingHours);
+    await hoursInput.fill(String(hotelingHours));
 
     const typedValue = await hoursInput.inputValue();
 
-    if (typedValue !== hotelingHours) {
+    if (typedValue !== String(hotelingHours)) {
       throw new Error(`Hours field mismatch. Expected "${hotelingHours}", got "${typedValue}"`);
     }
 
     if (dryRun) {
       console.log('Dry run completed successfully');
-      res.json({
+      return {
         ok: true,
         dryRun: true,
         message: `Dry run confirmed access to Hoteling Guest for hours ${hotelingHours}`
-      });
-      return;
+      };
     }
 
     await modal.getByRole('button', { name: 'Save' }).click();
@@ -384,11 +374,11 @@ app.post('/run', async (req, res) => {
 
     console.log('Run completed successfully');
 
-    res.json({
+    return {
       ok: true,
       dryRun: false,
       message: `Updated Hoteling Guest hours to ${hotelingHours}`
-    });
+    };
   } catch (error) {
     console.error('Run failed:', error.message);
 
@@ -396,14 +386,118 @@ app.post('/run', async (req, res) => {
       await saveDebugArtifacts(page, 'run-error');
     }
 
-    res.status(500).json({
+    return {
       ok: false,
       error: error.message
-    });
+    };
   } finally {
     if (browser) {
       await browser.close();
     }
+  }
+}
+
+async function callAppsScriptAction(action) {
+  const response = await fetch(CONFIG.appsScriptWebAppUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ action })
+  });
+
+  const text = await response.text();
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    data = {
+      ok: false,
+      error: 'Apps Script response was not valid JSON',
+      raw: text
+    };
+  }
+
+  return {
+    httpStatus: response.status,
+    data
+  };
+}
+
+app.get('/', (_req, res) => {
+  res.send('Rogers Playwright service is running.');
+});
+
+/*
+  Direct route. Keeps your existing manual test path.
+*/
+app.post('/run', async (req, res) => {
+  const hotelingHours = String(req.body?.hotelingHours || '').trim();
+  const dryRun = Boolean(req.body?.dryRun);
+  const traceLabel = String(req.body?.traceLabel || '');
+
+  const result = await runRogersUpdate(hotelingHours, dryRun, traceLabel);
+
+  if (result.ok) {
+    return res.status(200).json(result);
+  }
+
+  return res.status(500).json(result);
+});
+
+/*
+  New orchestrator route.
+  Cloud Scheduler should call THIS route.
+*/
+app.post('/orchestrate', async (req, res) => {
+  try {
+    const action = String(req.body?.action || '').trim();
+
+    if (!action) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Missing action'
+      });
+    }
+
+    const allowedActions = ['precheck', 'execute', 'retry1', 'retry2'];
+
+    if (!allowedActions.includes(action)) {
+      return res.status(400).json({
+        ok: false,
+        error: `Invalid action: ${action}`
+      });
+    }
+
+    console.log(`Orchestrate request received for action: ${action}`);
+
+    const appsScriptResult = await callAppsScriptAction(action);
+
+    console.log('Apps Script HTTP status:', appsScriptResult.httpStatus);
+    console.log('Apps Script response:', JSON.stringify(appsScriptResult.data));
+
+    if (appsScriptResult.httpStatus >= 200 && appsScriptResult.httpStatus < 300 && appsScriptResult.data.ok === true) {
+      return res.status(200).json({
+        ok: true,
+        action,
+        appsScript: appsScriptResult.data
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      action,
+      appsScriptHttpStatus: appsScriptResult.httpStatus,
+      appsScript: appsScriptResult.data
+    });
+  } catch (error) {
+    console.error('Orchestrate failed:', error.message);
+
+    return res.status(500).json({
+      ok: false,
+      error: error.message
+    });
   }
 });
 
