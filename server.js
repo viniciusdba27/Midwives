@@ -9,7 +9,6 @@ const CONFIG = {
   username: process.env.ROGERS_USERNAME || '',
   password: process.env.ROGERS_PASSWORD || '',
   headless: true,
-  userOptionLabel: '1, User (6047698134)',
   userServicesUrl: 'https://smartvoice.shawbusiness.ca/user/user_services/?userId=6047698134%40shawbusiness.ca&type=CallControl',
   dashboardUrl: 'https://smartvoice.shawbusiness.ca/index/dashboard/'
 };
@@ -261,8 +260,8 @@ async function navigateToUserServices(page) {
     return sel && sel.options.length > 1 && !sel.disabled;
   }, { timeout: 15000 });
 
-  console.log('[services] Selecting user from dashboard:', CONFIG.userOptionLabel);
-  await userSelect.selectOption({ label: CONFIG.userOptionLabel });
+  console.log('[services] Selecting user from dashboard: 1, User (6047698134)');
+  await userSelect.selectOption({ label: '1, User (6047698134)' });
 
   await page.waitForURL('**/user/user_services/**', { timeout: 60000 });
   await page.waitForLoadState('load');
@@ -274,6 +273,36 @@ async function navigateToUserServices(page) {
   }
 
   console.log('[services] Dashboard fallback reached a populated user services page.');
+}
+
+async function ensureCallControlSelected(page) {
+  const serviceType = page.locator('#serviceTypeSelect');
+
+  const exists = await serviceType.count().catch(() => 0);
+  if (!exists) {
+    console.log('[services] No service type dropdown found. Continuing...');
+    return;
+  }
+
+  console.log('[services] Ensuring Call Control is selected...');
+
+  const currentValue = await serviceType.inputValue().catch(() => '');
+  console.log('[services] Current serviceType value:', currentValue);
+
+  if (currentValue !== 'CallControl') {
+    await serviceType.selectOption('CallControl');
+    await wait(3000);
+
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 10000 });
+    } catch (e) {
+      console.log('[services] networkidle did not happen after Call Control select. Continuing...');
+    }
+
+    await wait(2000);
+  }
+
+  console.log('[services] Call Control selection step complete.');
 }
 
 async function openHotelingModal(page) {
@@ -289,6 +318,8 @@ async function openHotelingModal(page) {
   }
 
   await wait(3000);
+
+  await ensureCallControlSelected(page);
 
   const pageText = await page.locator('body').innerText().catch(() => '');
   console.log('[hoteling] Page text sample:', pageText.slice(0, 4000));
