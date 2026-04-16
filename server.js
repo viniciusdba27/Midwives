@@ -9,7 +9,9 @@ const CONFIG = {
   username: process.env.ROGERS_USERNAME || '',
   password: process.env.ROGERS_PASSWORD || '',
   headless: true,
-  userServicesUrl: 'https://smartvoice.shawbusiness.ca/user/user_services/?userId=6047698134%40shawbusiness.ca&type=CallControl'
+  userOptionLabel: '1, User (6047698134)',
+  userServicesUrl: 'https://smartvoice.shawbusiness.ca/user/user_services/?userId=6047698134%40shawbusiness.ca&type=CallControl',
+  dashboardUrl: 'https://smartvoice.shawbusiness.ca/index/dashboard/'
 };
 
 function wait(ms) {
@@ -182,6 +184,98 @@ async function waitForAuthenticatedPage(page) {
   }
 }
 
+async function getPageDiagnostics(page, label) {
+  const currentUrl = page.url();
+  const title = await page.title().catch(() => '');
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  const bodyHtml = await page.locator('body').innerHTML().catch(() => '');
+  const serviceCardCount = await page.locator('.user_service_container').count().catch(() => 0);
+
+  console.log(`[diag:${label}] URL:`, currentUrl);
+  console.log(`[diag:${label}] Title:`, title);
+  console.log(`[diag:${label}] Service card count:`, serviceCardCount);
+  console.log(`[diag:${label}] Body text sample:`, bodyText.slice(0, 4000));
+  console.log(`[diag:${label}] Body HTML sample:`, bodyHtml.slice(0, 4000));
+
+  return {
+    currentUrl,
+    title,
+    bodyText,
+    bodyHtml,
+    serviceCardCount
+  };
+}
+
+async function pageLooksEmpty(page) {
+  const diag = await getPageDiagnostics(page, 'emptiness-check');
+  const hasMeaningfulText = diag.bodyText.trim().length > 20;
+  const hasServiceCards = diag.serviceCardCount > 0;
+  return !(hasMeaningfulText || hasServiceCards);
+}
+
+async function navigateToUserServices(page) {
+  console.log('[services] Trying direct navigation to user services page...');
+  await page.goto(CONFIG.userServicesUrl, {
+    waitUntil: 'load',
+    timeout: 60000
+  });
+
+  await wait(5000);
+
+  let empty = await pageLooksEmpty(page);
+
+  if (!empty) {
+    console.log('[services] Direct user services page has content.');
+    return;
+  }
+
+  console.log('[services] Direct page looks empty. Retrying once with reload...');
+  await page.reload({ waitUntil: 'load', timeout: 60000 });
+  await wait(5000);
+
+  empty = await pageLooksEmpty(page);
+
+  if (!empty) {
+    console.log('[services] User services page has content after reload.');
+    return;
+  }
+
+  console.log('[services] Still empty. Falling back to dashboard dropdown flow...');
+
+  await page.goto(CONFIG.dashboardUrl, {
+    waitUntil: 'load',
+    timeout: 60000
+  });
+
+  await wait(3000);
+
+  const userSelect = page.getByLabel('User', { exact: true });
+  await userSelect.waitFor({ state: 'visible', timeout: 30000 });
+
+  await page.waitForFunction(() => {
+    const selects = Array.from(document.querySelectorAll('select'));
+    const sel = selects.find(s => {
+      const label = s.labels && s.labels[0];
+      return label && label.textContent && label.textContent.trim() === 'User';
+    });
+    return sel && sel.options.length > 1 && !sel.disabled;
+  }, { timeout: 15000 });
+
+  console.log('[services] Selecting user from dashboard:', CONFIG.userOptionLabel);
+  await userSelect.selectOption({ label: CONFIG.userOptionLabel });
+
+  await page.waitForURL('**/user/user_services/**', { timeout: 60000 });
+  await page.waitForLoadState('load');
+  await wait(5000);
+
+  const finalEmpty = await pageLooksEmpty(page);
+  if (finalEmpty) {
+    throw new Error('User services page is still empty even after dashboard fallback');
+  }
+
+  console.log('[services] Dashboard fallback reached a populated user services page.');
+}
+
 async function openHotelingModal(page) {
   console.log('[hoteling] Waiting for user services content to render...');
 
@@ -196,15 +290,15 @@ async function openHotelingModal(page) {
 
   await wait(3000);
 
-  const serviceCards = page.locator('.user_service_container');
-  const serviceCardCount = await serviceCards.count().catch(() => 0);
-  console.log('[hoteling] Service card count:', serviceCardCount);
-
-  const bodyText = await page.locator('body').innerText().catch(() => '');
-  console.log('[hoteling] Page text sample:', bodyText.slice(0, 4000));
+  const pageText = await page.locator('body').innerText().catch(() => '');
+  console.log('[hoteling] Page text sample:', pageText.slice(0, 4000));
 
   const bodyHtml = await page.locator('body').innerHTML().catch(() => '');
   console.log('[hoteling] Page HTML sample:', bodyHtml.slice(0, 4000));
+
+  const serviceCards = page.locator('.user_service_container');
+  const serviceCardCount = await serviceCards.count().catch(() => 0);
+  console.log('[hoteling] Service card count:', serviceCardCount);
 
   const hotelingRow = page
     .locator('.user_service_container')
@@ -299,13 +393,9 @@ app.post('/run', async (req, res) => {
     await page.unroute('**/js/common.js**');
     console.log('[nav] common.js interception removed after login');
 
-    console.log('[services] Navigating directly to user services page...');
-    await page.goto(CONFIG.userServicesUrl, {
-      waitUntil: 'load',
-      timeout: 60000
-    });
+    await navigateToUserServices(page);
 
-    console.log('[services] Current URL:', page.url());
+    console.log('[services] Current URL after navigation strategy:', page.url());
 
     await openHotelingModal(page);
 
