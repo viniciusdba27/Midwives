@@ -9,7 +9,8 @@ const CONFIG = {
   username: process.env.ROGERS_USERNAME || '',
   password: process.env.ROGERS_PASSWORD || '',
   headless: true,
-  userOptionLabel: '1, User (6047698134)'
+  userOptionLabel: '1, User (6047698134)',
+  userServicesUrl: 'https://smartvoice.shawbusiness.ca/user/user_services/?userId=6047698134%40shawbusiness.ca'
 };
 
 function wait(ms) {
@@ -241,19 +242,13 @@ app.post('/run', async (req, res) => {
 
     await waitForAuthenticatedPage(page);
 
-    if (page.url().includes('/index/dashboard/')) {
-      console.log('[dashboard] Reached dashboard:', page.url());
+    console.log('[services] Navigating directly to user services page...');
+    await page.goto(CONFIG.userServicesUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
 
-      console.log('[user] Selecting user:', CONFIG.userOptionLabel);
-      await page.getByLabel('User', { exact: true }).selectOption({
-        label: CONFIG.userOptionLabel
-      });
-
-      console.log('[services] Waiting for user services page...');
-      await page.waitForURL('**/user/user_services/**', { timeout: 60000 });
-    } else {
-      console.log('[services] Already on authenticated non dashboard page:', page.url());
-    }
+    console.log('[services] Current URL:', page.url());
 
     const serviceType = page.locator('#serviceTypeSelect');
     if (await serviceType.count()) {
