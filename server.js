@@ -9,7 +9,7 @@ const CONFIG = {
   username: process.env.ROGERS_USERNAME || '',
   password: process.env.ROGERS_PASSWORD || '',
   headless: true,
-  userServicesUrl: 'https://smartvoice.shawbusiness.ca/user/user_services/?userId=6047698134%40shawbusiness.ca'
+  userServicesUrl: 'https://smartvoice.shawbusiness.ca/user/user_services/?userId=6047698134%40shawbusiness.ca&type=CallControl'
 };
 
 function wait(ms) {
@@ -183,18 +183,24 @@ async function waitForAuthenticatedPage(page) {
 }
 
 async function openHotelingModal(page) {
-  console.log('[hoteling] Waiting for user services content to settle...');
-  await page.waitForLoadState('domcontentloaded');
-  await wait(2000);
+  console.log('[hoteling] Waiting for user services content to render...');
 
-  const serviceType = page.locator('#serviceTypeSelect');
-  if (await serviceType.count()) {
-    console.log('[services] Selecting Call Control...');
-    await serviceType.selectOption('CallControl');
-    await wait(2500);
+  await page.waitForLoadState('load');
+  await page.waitForLoadState('domcontentloaded');
+  await wait(4000);
+
+  try {
+    await Promise.race([
+      page.locator('.user_service_container').first().waitFor({ state: 'visible', timeout: 20000 }),
+      page.locator('#serviceTypeSelect').waitFor({ state: 'visible', timeout: 20000 }),
+      page.locator('text=Hoteling Guest').first().waitFor({ state: 'visible', timeout: 20000 })
+    ]);
+  } catch (e) {
+    console.log('[hoteling] No visible service content yet. Retrying with reload...');
+    await page.reload({ waitUntil: 'load', timeout: 60000 });
+    await wait(4000);
   }
 
-  console.log('[hoteling] Looking for Hoteling text anywhere on page...');
   const pageText = await page.locator('body').innerText().catch(() => '');
   console.log('[hoteling] Page text sample:', pageText.slice(0, 3000));
 
@@ -211,23 +217,19 @@ async function openHotelingModal(page) {
   console.log('[hoteling] Matching text count:', textCount);
 
   if (rowCount > 0) {
-    console.log('[hoteling] Waiting for Hoteling row to become visible...');
     await hotelingRow.first().waitFor({ state: 'visible', timeout: 30000 });
-
-    console.log('[hoteling] Clicking Edit inside Hoteling row...');
     await hotelingRow.first().getByRole('button', { name: 'Edit' }).click();
     return;
   }
 
   if (textCount > 0) {
-    console.log('[hoteling] Hoteling text exists but row selector failed. Trying nearby Edit button...');
     const container = hotelingTextAnywhere.locator('xpath=ancestor::*[contains(@class,"user_service_container")][1]');
     await container.waitFor({ state: 'visible', timeout: 30000 });
     await container.getByRole('button', { name: 'Edit' }).click();
     return;
   }
 
-  throw new Error('Hoteling Guest section not found on the user services page');
+  throw new Error('Hoteling Guest section not found on the fully rendered user services page');
 }
 
 app.get('/', (req, res) => {
@@ -294,7 +296,7 @@ app.post('/run', async (req, res) => {
 
     console.log('[services] Navigating directly to user services page...');
     await page.goto(CONFIG.userServicesUrl, {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'load',
       timeout: 60000
     });
 
