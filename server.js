@@ -9,7 +9,6 @@ const CONFIG = {
   username: process.env.ROGERS_USERNAME || '',
   password: process.env.ROGERS_PASSWORD || '',
   headless: true,
-  userOptionLabel: '1, User (6047698134)',
   userServicesUrl: 'https://smartvoice.shawbusiness.ca/user/user_services/?userId=6047698134%40shawbusiness.ca'
 };
 
@@ -42,7 +41,7 @@ async function navigateToLegacyLogin(page) {
     const loginDiv = document.getElementById('login');
     if (loginDiv) {
       loginDiv.classList.remove('banner-countdown-hidden');
-      loginDiv.style.display = '';
+      loginDiv.style.display = 'block';
       loginDiv.style.visibility = 'visible';
       loginDiv.style.opacity = '1';
     }
@@ -50,7 +49,7 @@ async function navigateToLegacyLogin(page) {
     ['username', 'password'].forEach((name) => {
       const el = document.querySelector(`input[name="${name}"]`);
       if (el) {
-        el.style.display = '';
+        el.style.display = 'block';
         el.style.visibility = 'visible';
         el.style.opacity = '1';
       }
@@ -289,6 +288,9 @@ app.post('/run', async (req, res) => {
     await loginButton.click();
 
     await waitForAuthenticatedPage(page);
+
+    await page.unroute('**/js/common.js**');
+    console.log('[nav] common.js interception removed after login');
 
     console.log('[services] Navigating directly to user services page...');
     await page.goto(CONFIG.userServicesUrl, {
