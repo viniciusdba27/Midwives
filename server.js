@@ -119,6 +119,69 @@ async function waitForLoginForm(page) {
   console.log('[login] Login form is ready.');
 }
 
+async function getVisibleLoginElements(page) {
+  console.log('[login] Locating visible login form...');
+
+  const loginContainerCandidates = [
+    page.locator('#login').first(),
+    page.locator('form:has(input[name="username"])').first(),
+    page.locator('body').first()
+  ];
+
+  for (const candidate of loginContainerCandidates) {
+    try {
+      const isVisible = await candidate.isVisible().catch(() => false);
+      if (!isVisible) {
+        continue;
+      }
+
+      const usernameInput = candidate.locator('input[name="username"]').first();
+      const passwordInput = candidate.locator('input[name="password"]').first();
+
+      const userVisible = await usernameInput.isVisible().catch(() => false);
+      const passVisible = await passwordInput.isVisible().catch(() => false);
+
+      if (userVisible && passVisible) {
+        let loginButton = candidate.getByRole('button', { name: 'Login' }).first();
+        const buttonVisible = await loginButton.isVisible().catch(() => false);
+
+        if (!buttonVisible) {
+          loginButton = page.getByRole('button', { name: 'Login' }).first();
+        }
+
+        console.log('[login] Using visible login container.');
+        return {
+          usernameInput,
+          passwordInput,
+          loginButton
+        };
+      }
+    } catch (e) {
+      // continue
+    }
+  }
+
+  throw new Error('Could not find a visible usable login form');
+}
+
+async function waitForAuthenticatedPage(page) {
+  console.log('[login] Waiting for post login navigation...');
+
+  await Promise.race([
+    page.waitForURL('**/index/dashboard/**', { timeout: 60000 }),
+    page.waitForURL('**/user/user_services/**', { timeout: 60000 }),
+    page.waitForURL('**/assistant/login**', { timeout: 60000 }),
+    page.waitForURL('**/auth/login/**', { timeout: 60000 })
+  ]);
+
+  const postLoginUrl = page.url();
+  console.log('[login] Post login URL:', postLoginUrl);
+
+  if (postLoginUrl.includes('/assistant/login') || postLoginUrl.includes('/auth/login/')) {
+    throw new Error(`Login did not reach an authenticated page. Landed on: ${postLoginUrl}`);
+  }
+}
+
 app.get('/', (req, res) => {
   res.send('Rogers Playwright service is running.');
 });
@@ -167,24 +230,30 @@ app.post('/run', async (req, res) => {
 
     await waitForLoginForm(page);
 
+    const { usernameInput, passwordInput, loginButton } = await getVisibleLoginElements(page);
+
     console.log('[login] Filling credentials...');
-    await page.locator('input[name="username"]').fill(CONFIG.username);
-    await page.locator('input[name="password"]').fill(CONFIG.password);
+    await usernameInput.fill(CONFIG.username);
+    await passwordInput.fill(CONFIG.password);
 
     console.log('[login] Submitting...');
-    await page.getByRole('button', { name: 'Login' }).click();
+    await loginButton.click();
 
-    console.log('[dashboard] Waiting for dashboard URL...');
-    await page.waitForURL('**/index/dashboard/**', { timeout: 60000 });
-    console.log('[dashboard] Reached dashboard:', page.url());
+    await waitForAuthenticatedPage(page);
 
-    console.log('[user] Selecting user:', CONFIG.userOptionLabel);
-    await page.getByLabel('User', { exact: true }).selectOption({
-      label: CONFIG.userOptionLabel
-    });
+    if (page.url().includes('/index/dashboard/')) {
+      console.log('[dashboard] Reached dashboard:', page.url());
 
-    console.log('[services] Waiting for user services page...');
-    await page.waitForURL('**/user/user_services/**', { timeout: 60000 });
+      console.log('[user] Selecting user:', CONFIG.userOptionLabel);
+      await page.getByLabel('User', { exact: true }).selectOption({
+        label: CONFIG.userOptionLabel
+      });
+
+      console.log('[services] Waiting for user services page...');
+      await page.waitForURL('**/user/user_services/**', { timeout: 60000 });
+    } else {
+      console.log('[services] Already on authenticated non dashboard page:', page.url());
+    }
 
     const serviceType = page.locator('#serviceTypeSelect');
     if (await serviceType.count()) {
