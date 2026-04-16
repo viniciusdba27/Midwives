@@ -16,86 +16,107 @@ function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function forceClickLegacy(page) {
-  console.log('Force clicking CLICK HERE aggressively...');
+async function navigateToLegacyLogin(page) {
+  console.log('[nav] Setting up common.js route interception...');
 
-  const start = Date.now();
-  const maxTime = 15000;
+  await page.route('**/js/common.js**', (route) => {
+    console.log('[nav] Blocked common.js ->', route.request().url());
+    route.abort();
+  });
 
-  while (Date.now() - start < maxTime) {
-    try {
-      await Promise.race([
-        page.locator('text=CLICK HERE').first().click({ timeout: 500 }),
-        page.getByRole('link', { name: /CLICK HERE/i }).click({ timeout: 500 }),
-        page.locator('a:has-text("CLICK HERE")').first().click({ timeout: 500 }),
-        page.locator('a.notice-middle-text-link').first().click({ timeout: 500 })
-      ]).catch(() => {});
+  console.log('[nav] Navigating to login page...');
+  await page.goto(CONFIG.firstPageUrl, {
+    waitUntil: 'domcontentloaded',
+    timeout: 30000
+  });
 
-      await wait(300);
-
-      const url = page.url();
-      if (url.includes('/assistant/login') || url.includes('/auth/login') || url.includes('/login')) {
-        console.log('Navigation detected after CLICK HERE');
-        return true;
-      }
-    } catch (e) {
-      // keep trying
-    }
-
-    await wait(200);
-  }
-
-  console.log('Failed to click CLICK HERE in time');
-  return false;
-}
-
-async function revealLoginFormIfHidden(page) {
-  console.log('Attempting targeted login form reveal...');
+  console.log('[nav] DOM loaded. Injecting banner removal...');
 
   await page.evaluate(() => {
-    const login = document.getElementById('login');
-    if (login) {
-      login.style.display = 'block';
-      login.style.visibility = 'visible';
-      login.classList.remove('banner-countdown-hidden');
+    const banner = document.getElementById('banner-redirect-notice');
+    if (banner) {
+      banner.remove();
     }
 
-    const username = document.querySelector('input[name="username"]');
-    const password = document.querySelector('input[name="password"]');
-
-    if (username) {
-      username.style.display = 'block';
-      username.style.visibility = 'visible';
+    const loginDiv = document.getElementById('login');
+    if (loginDiv) {
+      loginDiv.classList.remove('banner-countdown-hidden');
+      loginDiv.style.display = '';
+      loginDiv.style.visibility = 'visible';
+      loginDiv.style.opacity = '1';
     }
 
-    if (password) {
-      password.style.display = 'block';
-      password.style.visibility = 'visible';
-    }
+    ['username', 'password'].forEach((name) => {
+      const el = document.querySelector(`input[name="${name}"]`);
+      if (el) {
+        el.style.display = '';
+        el.style.visibility = 'visible';
+        el.style.opacity = '1';
+      }
+    });
   });
+
+  console.log('[nav] JS injection complete.');
 }
 
-async function waitForVisibleLoginForm(page) {
-  console.log('Waiting for visible login form...');
+async function waitForLoginForm(page) {
+  console.log('[login] Waiting for login form inputs to be interactable...');
 
-  const username = page.locator('input[name="username"]');
-  const password = page.locator('input[name="password"]');
+  const usernameLocator = page.locator('input[name="username"]');
+  const passwordLocator = page.locator('input[name="password"]');
 
   try {
-    await username.waitFor({ state: 'visible', timeout: 8000 });
-    await password.waitFor({ state: 'visible', timeout: 8000 });
-    console.log('Login form is visible without DOM assist');
-    return;
+    await usernameLocator.waitFor({ state: 'visible', timeout: 15000 });
+    await passwordLocator.waitFor({ state: 'visible', timeout: 15000 });
   } catch (e) {
-    console.log('Login form still hidden. Applying targeted reveal...');
+    console.log('[login] Inputs not visible yet. Running second reveal pass...');
+
+    await page.evaluate(() => {
+      const loginDiv = document.getElementById('login');
+      if (loginDiv) {
+        loginDiv.classList.remove('banner-countdown-hidden');
+        loginDiv.style.display = 'block';
+        loginDiv.style.visibility = 'visible';
+        loginDiv.style.opacity = '1';
+      }
+
+      let el = document.querySelector('input[name="username"]');
+      while (el && el !== document.body) {
+        el.style.visibility = 'visible';
+        el.style.opacity = '1';
+        if (el.tagName === 'INPUT') {
+          el.style.display = 'block';
+        }
+        el = el.parentElement;
+      }
+
+      let el2 = document.querySelector('input[name="password"]');
+      while (el2 && el2 !== document.body) {
+        el2.style.visibility = 'visible';
+        el2.style.opacity = '1';
+        if (el2.tagName === 'INPUT') {
+          el2.style.display = 'block';
+        }
+        el2 = el2.parentElement;
+      }
+    });
+
+    await usernameLocator.waitFor({ state: 'visible', timeout: 10000 });
+    await passwordLocator.waitFor({ state: 'visible', timeout: 10000 });
   }
 
-  await revealLoginFormIfHidden(page);
+  const stillHidden = await page.evaluate(() => {
+    const u = document.querySelector('input[name="username"]');
+    if (!u) return true;
+    const rect = u.getBoundingClientRect();
+    return rect.width === 0 || rect.height === 0;
+  });
 
-  await username.waitFor({ state: 'visible', timeout: 15000 });
-  await password.waitFor({ state: 'visible', timeout: 15000 });
+  if (stillHidden) {
+    throw new Error('Username input is still hidden after reveal attempts');
+  }
 
-  console.log('Login form is visible after targeted reveal');
+  console.log('[login] Login form is ready.');
 }
 
 app.get('/', (req, res) => {
@@ -103,7 +124,7 @@ app.get('/', (req, res) => {
 });
 
 app.post('/run', async (req, res) => {
-  console.log('RUN endpoint HIT');
+  console.log('\n=== /run called ===');
   console.log('Body:', req.body);
 
   let browser;
@@ -112,14 +133,14 @@ app.post('/run', async (req, res) => {
     const hotelingHours = String(req.body?.hotelingHours || '').trim();
 
     if (!hotelingHours || isNaN(hotelingHours)) {
-      throw new Error('Invalid hotelingHours');
+      throw new Error('Invalid hotelingHours: must be a number');
     }
 
     if (!CONFIG.username || !CONFIG.password) {
-      throw new Error('Missing Cloud Run environment variables: ROGERS_USERNAME or ROGERS_PASSWORD');
+      throw new Error('Missing env vars: ROGERS_USERNAME or ROGERS_PASSWORD');
     }
 
-    console.log('Hours to apply:', hotelingHours);
+    console.log('[config] Hours to apply:', hotelingHours);
 
     browser = await chromium.launch({
       headless: CONFIG.headless,
@@ -130,106 +151,91 @@ app.post('/run', async (req, res) => {
       ]
     });
 
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/124.0.0.0 Safari/537.36'
+    });
+
     const page = await context.newPage();
     page.setDefaultTimeout(60000);
 
-    console.log('Opening entry page...');
-    await page.goto(CONFIG.firstPageUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000
-    });
+    await navigateToLegacyLogin(page);
+    console.log('[nav] Current URL after navigation:', page.url());
 
-    console.log('Initial URL:', page.url());
+    await waitForLoginForm(page);
 
-    const usernameInput = page.locator('input[name="username"]');
-    const passwordInput = page.locator('input[name="password"]');
-
-    const usernameVisibleNow = await usernameInput.isVisible().catch(() => false);
-    const passwordVisibleNow = await passwordInput.isVisible().catch(() => false);
-
-    if (usernameVisibleNow && passwordVisibleNow) {
-      console.log('Login form already visible. Skipping CLICK HERE logic.');
-    } else {
-      console.log('Login form not visible yet. Trying legacy CLICK HERE flow...');
-      await forceClickLegacy(page);
-    }
-
-    console.log('Waiting for stable login page...');
-    await page.waitForLoadState('domcontentloaded');
-    await wait(1000);
-
-    console.log('Login page URL:', page.url());
-
-    await waitForVisibleLoginForm(page);
-
-    console.log('Filling login...');
+    console.log('[login] Filling credentials...');
     await page.locator('input[name="username"]').fill(CONFIG.username);
     await page.locator('input[name="password"]').fill(CONFIG.password);
 
-    console.log('Submitting login...');
+    console.log('[login] Submitting...');
     await page.getByRole('button', { name: 'Login' }).click();
 
-    console.log('Waiting for dashboard...');
+    console.log('[dashboard] Waiting for dashboard URL...');
     await page.waitForURL('**/index/dashboard/**', { timeout: 60000 });
+    console.log('[dashboard] Reached dashboard:', page.url());
 
-    console.log('Selecting user...');
+    console.log('[user] Selecting user:', CONFIG.userOptionLabel);
     await page.getByLabel('User', { exact: true }).selectOption({
       label: CONFIG.userOptionLabel
     });
 
-    console.log('Waiting for user services page...');
+    console.log('[services] Waiting for user services page...');
     await page.waitForURL('**/user/user_services/**', { timeout: 60000 });
 
     const serviceType = page.locator('#serviceTypeSelect');
-
     if (await serviceType.count()) {
-      console.log('Selecting Call Control...');
+      console.log('[services] Selecting Call Control...');
       await serviceType.selectOption('CallControl');
       await wait(1500);
     }
 
-    console.log('Opening Hoteling Guest editor...');
+    console.log('[hoteling] Locating Hoteling Guest row...');
     const hotelingRow = page
       .locator('.user_service_container')
       .filter({ hasText: 'Hoteling Guest' });
 
+    await hotelingRow.waitFor({ state: 'visible', timeout: 30000 });
     await hotelingRow.getByRole('button', { name: 'Edit' }).click();
 
-    console.log('Waiting for Hoteling Guest modal...');
+    console.log('[hoteling] Waiting for modal...');
     const modal = page
       .locator('.ui-dialog')
       .filter({ hasText: 'Hoteling Guest' });
 
-    await modal.waitFor({ state: 'visible', timeout: 60000 });
+    await modal.waitFor({ state: 'visible', timeout: 30000 });
 
-    console.log('Setting hours...');
+    console.log('[hoteling] Setting hours to:', hotelingHours);
     const hoursInput = modal.getByRole('textbox', { name: 'Hours' });
 
-    await hoursInput.fill('');
+    await hoursInput.click({ clickCount: 3 });
+    await hoursInput.press('Backspace');
     await hoursInput.fill(hotelingHours);
 
     const typedValue = await hoursInput.inputValue();
-    console.log('Typed value:', typedValue);
+    console.log('[hoteling] Confirmed value in field:', typedValue);
 
     if (typedValue !== hotelingHours) {
-      throw new Error(`Hours mismatch. Expected ${hotelingHours}, got ${typedValue}`);
+      throw new Error(
+        `Hours field mismatch. Expected "${hotelingHours}", got "${typedValue}"`
+      );
     }
 
-    console.log('Saving...');
+    console.log('[hoteling] Saving...');
     await modal.getByRole('button', { name: 'Save' }).click();
 
-    await wait(2000);
+    await modal.waitFor({ state: 'hidden', timeout: 15000 });
 
-    console.log('SUCCESS');
-
+    console.log('=== SUCCESS ===\n');
     res.json({
       ok: true,
       message: `Updated Hoteling Guest hours to ${hotelingHours}`
     });
   } catch (error) {
-    console.error('ERROR:', error.message);
-
+    console.error('=== ERROR ===', error.message, '\n');
     res.status(500).json({
       ok: false,
       error: error.message
